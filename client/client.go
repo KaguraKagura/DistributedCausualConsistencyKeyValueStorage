@@ -12,30 +12,27 @@ import (
 
 	"Lab2/communication"
 	"Lab2/util"
+
+	"github.com/google/uuid"
 )
 
 var (
 	serverHostPort string
-	connection     net.Conn
+	clientID       string
 
 	genericLogger = log.New(os.Stdout, "", 0)
 	errorLogger   = log.New(os.Stdout, "ERROR: ", 0)
 )
 
 func Start() {
-	defer func() {
-		if connection != nil {
-			_ = connection.Close()
-		}
-	}()
-
 	genericLogger.Println(welcomeMessage)
+	clientID = uuid.NewString()
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
-			break
+			continue
 		}
 
 		var (
@@ -88,8 +85,6 @@ func Start() {
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
-
-	genericLogger.Printf("%s!", goodbye)
 }
 
 func connect(hostPort string) (string, error) {
@@ -101,30 +96,68 @@ func connect(hostPort string) (string, error) {
 	}
 	serverHostPort = hostPort
 
+	req, _ := json.Marshal(communication.ClientConnectRequest{
+		Op: communication.Connect,
+		Args: communication.ClientConnectRequestArgs{
+			ClientId: clientID,
+		},
+	})
+
 	// establish a tcp connection
 	dialer := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := dialer.Dial("tcp", serverHostPort)
 	if err != nil {
 		return "", err
 	}
+	defer func() {
+		_ = conn.Close()
+	}()
 
-	connection = conn
-	return fmt.Sprintf("connected to %q", serverHostPort), nil
+	if _, err := conn.Write(req); err != nil {
+		return "", err
+	}
+
+	var resp communication.ClientConnectResponse
+	d := json.NewDecoder(conn)
+	if err := d.Decode(&resp); err != nil {
+		return "", err
+	}
+
+	switch resp.Result {
+	case communication.Success:
+		return fmt.Sprintf("connected to %q", serverHostPort), nil
+	case communication.Fail:
+		return "", fmt.Errorf(resp.DetailedResult)
+	default:
+		return "", fmt.Errorf("unknown operation result from server")
+	}
 }
 
 func read(key string) (string, error) {
 	req, _ := json.Marshal(communication.ClientReadRequest{
-		Op:  communication.Read,
-		Key: key,
+		Op: communication.Read,
+		Args: communication.ClientReadRequestArgs{
+			ClientId: clientID,
+			Key:      key,
+		},
 	})
 
-	if _, err := connection.Write(req); err != nil {
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.Dial("tcp", serverHostPort)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if _, err := conn.Write(req); err != nil {
 		return "", err
 	}
 
 	// get response from server
 	var resp communication.ClientReadResponse
-	d := json.NewDecoder(connection)
+	d := json.NewDecoder(conn)
 	if err := d.Decode(&resp); err != nil {
 		return "", err
 	}
@@ -141,18 +174,30 @@ func read(key string) (string, error) {
 
 func write(key, value string) (string, error) {
 	req, _ := json.Marshal(communication.ClientWriteRequest{
-		Op:    communication.Write,
-		Key:   key,
-		Value: value,
+		Op: communication.Write,
+		Args: communication.ClientWriteRequestArgs{
+			ClientId: clientID,
+			Key:      key,
+			Value:    value,
+		},
 	})
 
-	if _, err := connection.Write(req); err != nil {
+	dialer := net.Dialer{Timeout: 3 * time.Second}
+	conn, err := dialer.Dial("tcp", serverHostPort)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	if _, err := conn.Write(req); err != nil {
 		return "", err
 	}
 
 	// get response from server
 	var resp communication.ClientWriteResponse
-	d := json.NewDecoder(connection)
+	d := json.NewDecoder(conn)
 	if err := d.Decode(&resp); err != nil {
 		return "", err
 	}

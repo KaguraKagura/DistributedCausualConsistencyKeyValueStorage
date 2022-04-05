@@ -29,7 +29,7 @@ type valueOfKey struct {
 }
 
 type causalConsistencyMaintainer struct {
-	dependencyByClient map[string][]communication.DependencyData
+	dependencyByClientId map[string][]communication.DependencyData
 	sync.Mutex
 }
 
@@ -121,7 +121,7 @@ func start(hostPort string, otherServers []string) error {
 	otherServersHostPorts = make([]string, len(otherServers))
 	copy(otherServersHostPorts, otherServers)
 	storage.storage = make(map[string]valueOfKey)
-	maintainer.dependencyByClient = make(map[string][]communication.DependencyData)
+	maintainer.dependencyByClientId = make(map[string][]communication.DependencyData)
 
 	// start to listen
 	l, err := net.Listen("tcp", hostPort)
@@ -138,14 +138,11 @@ func start(hostPort string, otherServers []string) error {
 			}
 
 			go func() {
-				client := conn.RemoteAddr().String()
-				// add an empty dependency list for the current client
-				maintainer.Lock()
-				maintainer.dependencyByClient[client] = make([]communication.DependencyData, 0)
-				maintainer.Unlock()
+				defer func() {
+					_ = conn.Close()
+				}()
 
 				var resp []byte
-
 				var genericReq genericRequest
 				failToUnmarshalResp := makeFailResp("fail to unmarshal")
 				d := json.NewDecoder(conn)
@@ -154,63 +151,53 @@ func start(hostPort string, otherServers []string) error {
 					resp = failToUnmarshalResp
 				} else {
 					switch genericReq.Op {
-					case string(communication.Read):
-						var temp struct {
-							Key string
-						}
+					case communication.Connect:
+						var temp communication.ClientConnectRequestArgs
 						if err := json.Unmarshal(genericReq.Args, &temp); err != nil {
 							resp = failToUnmarshalResp
 							break
 						}
-						resp = handleClientRead(client, communication.ClientReadRequest{
-							Op:  communication.ClientServerOperation(genericReq.Op),
-							Key: temp.Key,
+						resp = handleClientConnect(communication.ClientConnectRequest{
+							Op:   genericReq.Op,
+							Args: temp,
 						})
-					case string(communication.Write):
-						var temp struct {
-							Key   string
-							Value string
-						}
+					case communication.Read:
+						var temp communication.ClientReadRequestArgs
 						if err := json.Unmarshal(genericReq.Args, &temp); err != nil {
 							resp = failToUnmarshalResp
 							break
 						}
-						resp = handleClientWrite(client, communication.ClientWriteRequest{
-							Op:    communication.ClientServerOperation(genericReq.Op),
-							Key:   temp.Key,
-							Value: temp.Value,
+						resp = handleClientRead(communication.ClientReadRequest{
+							Op:   genericReq.Op,
+							Args: temp,
 						})
-					case string(communication.ReplicatedWrite):
-						var temp struct {
-							Key            string
-							Value          string
-							Dependencies   []communication.DependencyData
-							Client         string
-							OriginalServer string
-							Clock          uint64
-						}
+					case communication.Write:
+						var temp communication.ClientWriteRequestArgs
 						if err := json.Unmarshal(genericReq.Args, &temp); err != nil {
 							resp = failToUnmarshalResp
 							break
 						}
-						go handleServerReplicatedWrite(communication.ServerReplicatedWriteRequest{
-							Op:             communication.ServerServerOperation(genericReq.Op),
-							Key:            temp.Key,
-							Value:          temp.Value,
-							Dependencies:   temp.Dependencies,
-							Client:         temp.Client,
-							OriginalServer: temp.OriginalServer,
-							Clock:          temp.Clock,
+						resp = handleClientWrite(communication.ClientWriteRequest{
+							Op:   genericReq.Op,
+							Args: temp,
+						})
+					case communication.ReplicatedWrite:
+						var temp communication.ServerReplicatedWriteRequestArgs
+						if err := json.Unmarshal(genericReq.Args, &temp); err != nil {
+							resp = failToUnmarshalResp
+							break
+						}
+						handleServerReplicatedWrite(communication.ServerReplicatedWriteRequest{
+							Op:   genericReq.Op,
+							Args: temp,
 						})
 					default:
 						resp = makeFailResp(fmt.Sprintf("unknown operation %q", genericReq.Op))
 					}
 				}
 
-				if resp != nil {
-					if _, err := conn.Write(resp); err != nil {
-						errorLogger.Printf("%v", err)
-					}
+				if _, err := conn.Write(resp); err != nil {
+					errorLogger.Printf("%v", err)
 				}
 			}()
 		}
@@ -219,8 +206,28 @@ func start(hostPort string, otherServers []string) error {
 	return nil
 }
 
+// handleClientConnect returns a json encoded response
+func handleClientConnect(req communication.ClientConnectRequest) []byte {
+	infoLogger.Printf("handling:")
+	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
+
+	// add an empty dependency list for the new client
+	maintainer.Lock()
+	if _, ok := maintainer.dependencyByClientId[req.Args.ClientId]; !ok {
+		maintainer.dependencyByClientId[req.Args.ClientId] = make([]communication.DependencyData, 0)
+	}
+	maintainer.Unlock()
+
+	resp, _ := json.Marshal(communication.ClientConnectResponse{
+		Op:             req.Op,
+		Result:         communication.Success,
+		DetailedResult: "connect is successful",
+	})
+	return resp
+}
+
 // handleClientRead returns a json encoded response
-func handleClientRead(client string, req communication.ClientReadRequest) []byte {
+func handleClientRead(req communication.ClientReadRequest) []byte {
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
 
@@ -231,15 +238,15 @@ func handleClientRead(client string, req communication.ClientReadRequest) []byte
 		storage.Unlock()
 	}()
 
-	v, ok := storage.storage[req.Key]
+	v, ok := storage.storage[req.Args.Key]
 	if !ok {
-		return makeFailResp(fmt.Sprintf("key %q does not exist", req.Key))
+		return makeFailResp(fmt.Sprintf("key %q does not exist", req.Args.Key))
 	}
 
 	// update dependency data
-	d := maintainer.dependencyByClient[client]
-	d = append(d, communication.DependencyData{
-		Key:                   req.Key,
+	d := maintainer.dependencyByClientId[req.Args.ClientId]
+	maintainer.dependencyByClientId[req.Args.ClientId] = append(d, communication.DependencyData{
+		Key:                   req.Args.Key,
 		OriginalServer:        v.originalServer,
 		LamportClockTimestamp: v.lamportClockTimestamp,
 	})
@@ -248,19 +255,19 @@ func handleClientRead(client string, req communication.ClientReadRequest) []byte
 		Op:             req.Op,
 		Result:         communication.Success,
 		DetailedResult: "read is successful",
-		Key:            req.Key,
+		Key:            req.Args.Key,
 		Value:          v.value,
 	})
 	return resp
 }
 
 // handleClientWrite returns a json encoded response
-func handleClientWrite(client string, req communication.ClientWriteRequest) []byte {
+func handleClientWrite(req communication.ClientWriteRequest) []byte {
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
 
-	k := req.Key
-	v := req.Value
+	k := req.Args.Key
+	v := req.Args.Value
 
 	storage.Lock()
 	maintainer.Lock()
@@ -272,7 +279,6 @@ func handleClientWrite(client string, req communication.ClientWriteRequest) []by
 		originalServer:        selfHostPort,
 		lamportClockTimestamp: clock.clock,
 	}
-	maintainer.dependencyByClient[client] = make([]communication.DependencyData, 0)
 
 	resp, _ := json.Marshal(communication.ClientWriteResponse{
 		Op:             req.Op,
@@ -290,26 +296,43 @@ func handleClientWrite(client string, req communication.ClientWriteRequest) []by
 			storage.Unlock()
 		}()
 
-		req, _ := json.Marshal(communication.ServerReplicatedWriteRequest{
-			Op:           communication.ReplicatedWrite,
-			Key:          k,
-			Value:        v,
-			Dependencies: maintainer.dependencyByClient[client],
-			Client:       client,
-			Clock:        clock.clock,
+		r, _ := json.Marshal(communication.ServerReplicatedWriteRequest{
+			Op: communication.ReplicatedWrite,
+			Args: communication.ServerReplicatedWriteRequestArgs{
+				Key:            k,
+				Value:          v,
+				ClientId:       req.Args.ClientId,
+				Dependencies:   maintainer.dependencyByClientId[req.Args.ClientId],
+				OriginalServer: selfHostPort,
+				Clock:          clock.clock,
+			},
 		})
 
-		for _, hp := range otherServersHostPorts {
-			dialer := net.Dialer{Timeout: 3 * time.Second}
-			conn, err := dialer.Dial("tcp", hp)
-			if err != nil {
-				errorLogger.Printf("%v", err)
-			}
+		maintainer.dependencyByClientId[req.Args.ClientId] = []communication.DependencyData{
+			{
+				Key:                   k,
+				OriginalServer:        selfHostPort,
+				LamportClockTimestamp: clock.clock,
+			},
+		}
 
-			if _, err := conn.Write(req); err != nil {
-				errorLogger.Printf("%v", err)
-			}
-			_ = conn.Close()
+		for _, hp := range otherServersHostPorts {
+			hp := hp
+			go func() {
+				if hp == "localhost:33333" && k != "x" {
+					time.Sleep(15 * time.Second)
+				}
+				dialer := net.Dialer{Timeout: 3 * time.Second}
+				conn, err := dialer.Dial("tcp", hp)
+				if err != nil {
+					errorLogger.Printf("%v", err)
+				}
+
+				if _, err := conn.Write(r); err != nil {
+					errorLogger.Printf("%v", err)
+				}
+				_ = conn.Close()
+			}()
 		}
 	}()
 
@@ -321,27 +344,27 @@ func handleServerReplicatedWrite(req communication.ServerReplicatedWriteRequest)
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
 
-	k := req.Key
-	v := req.Value
+	k := req.Args.Key
+	v := req.Args.Value
 	defer func() {
 		clock.Lock()
-		clock.clock = newLamportsClock(clock.clock, req.Clock)
+		clock.clock = newLamportsClock(clock.clock, req.Args.Clock)
 		clock.Unlock()
-		infoLogger.Printf("committed %q->%q", k, v)
+		genericLogger.Printf("committed %q->%q", k, v)
 	}()
 
-	if len(req.Dependencies) == 0 {
+	dependencies := req.Args.Dependencies
+	if len(dependencies) == 0 {
 		storage.Lock()
 		defer storage.Unlock()
 		storage.storage[k] = valueOfKey{
 			value:                 v,
-			originalServer:        req.OriginalServer,
-			lamportClockTimestamp: req.Clock,
+			originalServer:        req.Args.OriginalServer,
+			lamportClockTimestamp: req.Args.Clock,
 		}
 		return
 	}
 
-	dependencies := req.Dependencies
 	sort.Slice(dependencies, func(i, j int) bool {
 		return dependencies[i].LamportClockTimestamp < dependencies[j].LamportClockTimestamp
 	})
@@ -349,16 +372,17 @@ func handleServerReplicatedWrite(req communication.ServerReplicatedWriteRequest)
 	storage.Lock()
 	for _, dependency := range dependencies {
 		for {
-			if storedValue, ok := storage.storage[k]; !ok {
+			if storedValue, ok := storage.storage[dependency.Key]; !ok {
 				storage.Unlock()
+				infoLogger.Printf("delaying the write of %q->%q", k, v)
 				time.Sleep(1 * time.Second)
 				storage.Lock()
 			} else {
-				if storedValue.originalServer == dependency.OriginalServer &&
-					storedValue.lamportClockTimestamp == dependency.LamportClockTimestamp {
+				if storedValue.lamportClockTimestamp >= dependency.LamportClockTimestamp {
 					break
 				}
 				storage.Unlock()
+				infoLogger.Printf("delaying the write of %q->%q", k, v)
 				time.Sleep(1 * time.Second)
 				storage.Lock()
 			}
@@ -367,8 +391,8 @@ func handleServerReplicatedWrite(req communication.ServerReplicatedWriteRequest)
 
 	storage.storage[k] = valueOfKey{
 		value:                 v,
-		originalServer:        req.OriginalServer,
-		lamportClockTimestamp: req.Clock,
+		originalServer:        req.Args.OriginalServer,
+		lamportClockTimestamp: req.Args.Clock,
 	}
 	storage.Unlock()
 }

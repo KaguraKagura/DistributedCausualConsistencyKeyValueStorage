@@ -22,6 +22,7 @@ const (
 )
 
 var helpMessage = strings.Join([]string{
+	fmt.Sprintf("\t%s [ip:port of server]", connectCmd),
 	fmt.Sprintf("\t%s [key]", readCmd),
 	fmt.Sprintf("\t%s [key] [value]", writeCmd),
 	fmt.Sprintf("\t%s, %s", helpCmd, hCmd),
