@@ -79,9 +79,7 @@ func Start() {
 				genericLogger.Printf("%s", result)
 			}
 		}
-
 	}
-
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
@@ -112,7 +110,6 @@ func connect(hostPort string) (string, error) {
 	defer func() {
 		_ = conn.Close()
 	}()
-
 	if _, err := conn.Write(req); err != nil {
 		return "", err
 	}
@@ -122,7 +119,6 @@ func connect(hostPort string) (string, error) {
 	if err := d.Decode(&resp); err != nil {
 		return "", err
 	}
-
 	switch resp.Result {
 	case communication.Success:
 		return fmt.Sprintf("connected to %q", serverHostPort), nil
@@ -150,7 +146,6 @@ func read(key string) (string, error) {
 	defer func() {
 		_ = conn.Close()
 	}()
-
 	if _, err := conn.Write(req); err != nil {
 		return "", err
 	}
@@ -161,7 +156,6 @@ func read(key string) (string, error) {
 	if err := d.Decode(&resp); err != nil {
 		return "", err
 	}
-
 	switch resp.Result {
 	case communication.Success:
 		return fmt.Sprintf("%q -> %q", resp.Key, resp.Value), nil
@@ -190,7 +184,6 @@ func write(key, value string) (string, error) {
 	defer func() {
 		_ = conn.Close()
 	}()
-
 	if _, err := conn.Write(req); err != nil {
 		return "", err
 	}
@@ -201,7 +194,6 @@ func write(key, value string) (string, error) {
 	if err := d.Decode(&resp); err != nil {
 		return "", err
 	}
-
 	switch resp.Result {
 	case communication.Success:
 		return fmt.Sprintf("successfully written %q -> %q", resp.Key, resp.Value), nil

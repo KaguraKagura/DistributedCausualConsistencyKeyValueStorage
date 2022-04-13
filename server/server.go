@@ -23,9 +23,9 @@ type genericRequest struct {
 }
 
 type valueOfKey struct {
-	value                 string
-	originalServer        string
-	lamportClockTimestamp uint64
+	value                  string
+	originalServer         string
+	lamportsClockTimestamp uint64
 }
 
 type causalConsistencyMaintainer struct {
@@ -61,7 +61,6 @@ func Start() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-
 		if line == "" {
 			continue
 		}
@@ -90,7 +89,6 @@ func Start() {
 		default:
 			err = fmt.Errorf("%s %q", unrecognizedCommand, args[0])
 		}
-
 		if err != nil {
 			errorLogger.Printf("%v", err)
 		} else {
@@ -102,7 +100,6 @@ func Start() {
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
-
 	genericLogger.Printf("%s!", goodbye)
 }
 
@@ -195,18 +192,16 @@ func start(hostPort string, otherServers []string) error {
 						resp = makeFailResp(fmt.Sprintf("unknown operation %q", genericReq.Op))
 					}
 				}
-
 				if _, err := conn.Write(resp); err != nil {
 					errorLogger.Printf("%v", err)
 				}
 			}()
 		}
 	}()
-
 	return nil
 }
 
-// handleClientConnect returns a json encoded response
+// handleClientConnect handles the connection of a new client
 func handleClientConnect(req communication.ClientConnectRequest) []byte {
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
@@ -226,7 +221,7 @@ func handleClientConnect(req communication.ClientConnectRequest) []byte {
 	return resp
 }
 
-// handleClientRead returns a json encoded response
+// handleClientRead handles client read while updating dependency data
 func handleClientRead(req communication.ClientReadRequest) []byte {
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
@@ -246,9 +241,9 @@ func handleClientRead(req communication.ClientReadRequest) []byte {
 	// update dependency data
 	d := maintainer.dependencyByClientId[req.Args.ClientId]
 	maintainer.dependencyByClientId[req.Args.ClientId] = append(d, communication.DependencyData{
-		Key:                   req.Args.Key,
-		OriginalServer:        v.originalServer,
-		LamportClockTimestamp: v.lamportClockTimestamp,
+		Key:                    req.Args.Key,
+		OriginalServer:         v.originalServer,
+		LamportsClockTimestamp: v.lamportsClockTimestamp,
 	})
 
 	resp, _ := json.Marshal(communication.ClientReadResponse{
@@ -261,7 +256,7 @@ func handleClientRead(req communication.ClientReadRequest) []byte {
 	return resp
 }
 
-// handleClientWrite returns a json encoded response
+// handleClientWrite handles client write and send replicated write to other servers
 func handleClientWrite(req communication.ClientWriteRequest) []byte {
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
@@ -273,11 +268,12 @@ func handleClientWrite(req communication.ClientWriteRequest) []byte {
 	maintainer.Lock()
 	clock.Lock()
 
+	// increase the local lamport's clock
 	clock.clock++
 	storage.storage[k] = valueOfKey{
-		value:                 v,
-		originalServer:        selfHostPort,
-		lamportClockTimestamp: clock.clock,
+		value:                  v,
+		originalServer:         selfHostPort,
+		lamportsClockTimestamp: clock.clock,
 	}
 
 	resp, _ := json.Marshal(communication.ClientWriteResponse{
@@ -299,47 +295,51 @@ func handleClientWrite(req communication.ClientWriteRequest) []byte {
 		r, _ := json.Marshal(communication.ServerReplicatedWriteRequest{
 			Op: communication.ReplicatedWrite,
 			Args: communication.ServerReplicatedWriteRequestArgs{
-				Key:            k,
-				Value:          v,
-				ClientId:       req.Args.ClientId,
+				Key:      k,
+				Value:    v,
+				ClientId: req.Args.ClientId,
+				// local dependencies are given to other servers
 				Dependencies:   maintainer.dependencyByClientId[req.Args.ClientId],
 				OriginalServer: selfHostPort,
 				Clock:          clock.clock,
 			},
 		})
 
+		// update local dependencies
 		maintainer.dependencyByClientId[req.Args.ClientId] = []communication.DependencyData{
 			{
-				Key:                   k,
-				OriginalServer:        selfHostPort,
-				LamportClockTimestamp: clock.clock,
+				Key:                    k,
+				OriginalServer:         selfHostPort,
+				LamportsClockTimestamp: clock.clock,
 			},
 		}
 
+		// send replicated write to other servers
 		for _, hp := range otherServersHostPorts {
-			hp := hp
-			go func() {
-				if hp == "localhost:33333" && k != "x" {
+			go func(hp string) {
+				// simulate the delay of message if the receiver is localhost:33333 and the key does not begin with "x"
+				if hp == "localhost:33333" && !strings.HasPrefix(k, "x") {
 					time.Sleep(15 * time.Second)
 				}
+
 				dialer := net.Dialer{Timeout: 3 * time.Second}
 				conn, err := dialer.Dial("tcp", hp)
 				if err != nil {
 					errorLogger.Printf("%v", err)
 				}
-
 				if _, err := conn.Write(r); err != nil {
 					errorLogger.Printf("%v", err)
 				}
 				_ = conn.Close()
-			}()
+			}(hp)
 		}
 	}()
 
+	genericLogger.Printf(">>>>> committed %q->%q", k, v)
 	return resp
 }
 
-// handleClientWrite returns a json encoded response
+// handleServerReplicatedWrite handles replicated write from another server, ensuring causal consistency
 func handleServerReplicatedWrite(req communication.ServerReplicatedWriteRequest) {
 	infoLogger.Printf("handling:")
 	genericLogger.Printf("%s", util.StructToPrettyJsonString(req))
@@ -347,68 +347,72 @@ func handleServerReplicatedWrite(req communication.ServerReplicatedWriteRequest)
 	k := req.Args.Key
 	v := req.Args.Value
 	defer func() {
+		// increase local lamport's clock after committing
 		clock.Lock()
-		clock.clock = newLamportsClock(clock.clock, req.Args.Clock)
+		clock.clock = nextLamportsClock(clock.clock, req.Args.Clock)
 		clock.Unlock()
-		genericLogger.Printf("committed %q->%q", k, v)
+		genericLogger.Printf(">>>>> committed %q->%q", k, v)
 	}()
 
 	dependencies := req.Args.Dependencies
+	// if there are no dependencies, commit directly
 	if len(dependencies) == 0 {
 		storage.Lock()
 		defer storage.Unlock()
 		storage.storage[k] = valueOfKey{
-			value:                 v,
-			originalServer:        req.Args.OriginalServer,
-			lamportClockTimestamp: req.Args.Clock,
+			value:                  v,
+			originalServer:         req.Args.OriginalServer,
+			lamportsClockTimestamp: req.Args.Clock,
 		}
 		return
 	}
 
+	// else there are dependencies, first sort them by LamportsClockTimestamp from small to large
 	sort.Slice(dependencies, func(i, j int) bool {
-		return dependencies[i].LamportClockTimestamp < dependencies[j].LamportClockTimestamp
+		return dependencies[i].LamportsClockTimestamp < dependencies[j].LamportsClockTimestamp
 	})
 
+	// ensure causal consistency
 	storage.Lock()
+	defer storage.Unlock()
+	// look at dependencies from small LamportsClockTimestamp to large
 	for _, dependency := range dependencies {
+		// keep checking the dependency until satisfied
 		for {
-			if storedValue, ok := storage.storage[dependency.Key]; !ok {
-				storage.Unlock()
-				infoLogger.Printf("delaying the write of %q->%q", k, v)
-				time.Sleep(1 * time.Second)
-				storage.Lock()
-			} else {
-				if storedValue.lamportClockTimestamp >= dependency.LamportClockTimestamp {
+			// if the dependency's key value pair has been recorded
+			if storedValue, ok := storage.storage[dependency.Key]; ok {
+				// if the last write of the key value pair is at a clock same as or later than the dependency,
+				// it means the local state of the key value pair is newer than the dependency,
+				// which means the dependency has been satisfied,
+				// so break the checking loop and move on to the next dependency
+				if storedValue.lamportsClockTimestamp >= dependency.LamportsClockTimestamp {
 					break
 				}
-				storage.Unlock()
-				infoLogger.Printf("delaying the write of %q->%q", k, v)
-				time.Sleep(1 * time.Second)
-				storage.Lock()
 			}
+			// else go to sleep
+			storage.Unlock()
+			infoLogger.Printf("delaying the write of %q->%q", k, v)
+			time.Sleep(1 * time.Second)
+			storage.Lock()
 		}
 	}
 
+	// all dependencies have been received, can commit
 	storage.storage[k] = valueOfKey{
-		value:                 v,
-		originalServer:        req.Args.OriginalServer,
-		lamportClockTimestamp: req.Args.Clock,
+		value:                  v,
+		originalServer:         req.Args.OriginalServer,
+		lamportsClockTimestamp: req.Args.Clock,
 	}
-	storage.Unlock()
 }
 
 func makeFailResp(detailedResult string) []byte {
-	resp, _ := json.Marshal(struct {
-		Result         communication.OperationResult
-		DetailedResult string
-	}{
+	resp, _ := json.Marshal(communication.GenericClientResponse{
 		Result:         communication.Fail,
 		DetailedResult: detailedResult,
 	})
-
 	return resp
 }
 
-func newLamportsClock(local, message uint64) uint64 {
+func nextLamportsClock(local, message uint64) uint64 {
 	return uint64(math.Max(float64(local), float64(message+1)))
 }

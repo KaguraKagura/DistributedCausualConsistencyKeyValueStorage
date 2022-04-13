@@ -14,9 +14,14 @@ const (
 type OperationResult string
 
 type DependencyData struct {
-	Key                   string
-	OriginalServer        string
-	LamportClockTimestamp uint64
+	Key                    string
+	OriginalServer         string
+	LamportsClockTimestamp uint64
+}
+
+type GenericClientResponse struct {
+	Result         OperationResult
+	DetailedResult string
 }
 
 type ClientConnectRequest struct {
@@ -84,11 +89,3 @@ type ServerReplicatedWriteRequestArgs struct {
 	OriginalServer string
 	Clock          uint64
 }
-
-//type ServerReplicatedWriteResponse struct {
-//	Op             ServerServerOperation
-//	Result         OperationResult
-//	DetailedResult string
-//	Key            string
-//	Value          string
-//}
