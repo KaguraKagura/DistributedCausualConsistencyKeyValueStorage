@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,19 +47,22 @@ func Start() {
 				err = fmt.Errorf("%s. %s", badArguments, helpPrompt)
 				break
 			}
-			result, err = connect(args[1])
+			result, err = handleConnect(args[1])
 		case readCmd:
 			if len(args) != 2 {
 				err = fmt.Errorf("%s. %s", badArguments, helpPrompt)
 				break
 			}
-			result, err = read(args[1])
+			result, err = handleRead(args[1])
 		case writeCmd:
-			if len(args) != 3 {
+			argc := len(args)
+			if argc == 3 {
+				result, err = handleWrite(args[1], args[2])
+			} else if argc == 5 {
+				result, err = writeWithServerReplicatedWriteDelay(args[1], args[2], args[3], args[4])
+			} else {
 				err = fmt.Errorf("%s. %s", badArguments, helpPrompt)
-				break
 			}
-			result, err = write(args[1], args[2])
 		case hCmd:
 			fallthrough
 		case helpCmd:
@@ -85,7 +89,7 @@ func Start() {
 	}
 }
 
-func connect(hostPort string) (string, error) {
+func handleConnect(hostPort string) (string, error) {
 	if serverHostPort != "" {
 		return "", fmt.Errorf("already connected to %q", serverHostPort)
 	}
@@ -129,7 +133,7 @@ func connect(hostPort string) (string, error) {
 	}
 }
 
-func read(key string) (string, error) {
+func handleRead(key string) (string, error) {
 	req, _ := json.Marshal(communication.ClientReadRequest{
 		Op: communication.Read,
 		Args: communication.ClientReadRequestArgs{
@@ -166,13 +170,32 @@ func read(key string) (string, error) {
 	}
 }
 
-func write(key, value string) (string, error) {
+func handleWrite(key, value string) (string, error) {
+	return write(key, value, "", 0)
+}
+
+// writeWithServerReplicatedWriteDelay simulates network delay of ServerReplicatedWrite
+// it is for testing purpose to show causal consistency of the system
+func writeWithServerReplicatedWriteDelay(key, value, delayHostPort, delay string) (string, error) {
+	if err := util.ValidateHostPort(delayHostPort); err != nil {
+		return "", err
+	}
+	delayInSeconds, err := strconv.ParseInt(delay, 10, 64)
+	if err != nil || delayInSeconds < 0 {
+		return "", err
+	}
+	return write(key, value, delayHostPort, delayInSeconds)
+}
+
+func write(key, value, delayHostPort string, delayInSeconds int64) (string, error) {
 	req, _ := json.Marshal(communication.ClientWriteRequest{
 		Op: communication.Write,
 		Args: communication.ClientWriteRequestArgs{
-			ClientId: clientID,
-			Key:      key,
-			Value:    value,
+			ClientId:                      clientID,
+			Key:                           key,
+			Value:                         value,
+			ReplicatedWriteDelayInSeconds: delayInSeconds,
+			ReplicatedWriteDelayServer:    delayHostPort,
 		},
 	})
 

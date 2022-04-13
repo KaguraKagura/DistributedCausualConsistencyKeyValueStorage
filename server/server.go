@@ -317,9 +317,9 @@ func handleClientWrite(req communication.ClientWriteRequest) []byte {
 		// send replicated write to other servers
 		for _, hp := range otherServersHostPorts {
 			go func(hp string) {
-				// simulate the delay of message if the receiver is localhost:33333 and the key does not begin with "x"
-				if hp == "localhost:33333" && !strings.HasPrefix(k, "x") {
-					time.Sleep(15 * time.Second)
+				// simulate network delay for the particular server
+				if req.Args.ReplicatedWriteDelayServer == hp {
+					time.Sleep(time.Duration(req.Args.ReplicatedWriteDelayInSeconds) * time.Second)
 				}
 
 				dialer := net.Dialer{Timeout: 3 * time.Second}

@@ -66,6 +66,10 @@ type ClientWriteRequestArgs struct {
 	ClientId string
 	Key      string
 	Value    string
+
+	// ReplicatedWriteDelayServer and ReplicatedWriteDelayInSeconds are used to simulate network delay of a ServerReplicatedWrite
+	ReplicatedWriteDelayServer    string
+	ReplicatedWriteDelayInSeconds int64
 }
 
 type ClientWriteResponse struct {

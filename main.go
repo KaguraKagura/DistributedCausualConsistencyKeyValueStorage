@@ -15,7 +15,7 @@ import (
 func main() {
 	app := cli.App{
 		Name:      util.AppName,
-		Usage:     "a distributed key-value data center following causal consistency",
+		Usage:     "a distributed key-value data storage following causal consistency",
 		UsageText: fmt.Sprintf("%s command", util.AppName),
 		Commands: []*cli.Command{
 			{
